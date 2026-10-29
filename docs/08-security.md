@@ -76,9 +76,13 @@ export async function hashPassword(plain: string): Promise<string> {
 
 The hash is stored in `users.password_hash` (`VARCHAR(255)`), which is the
 column declared in `backend/prisma/schema.prisma` and created by the initial
-migration. The plain-text password is never persisted, logged or returned by
-any endpoint. The `passwordHash` field is explicitly stripped from the object
-returned by `authenticate`:
+migration. The plain-text password is never persisted or logged. It is returned
+by an endpoint in exactly one case: when an administrator creates an account or
+resets a password without supplying one, the API generates a temporary password
+(`backend/src/services/credentials.service.ts`) and returns it once, in that
+response, so the admin can hand it to the account holder. Only the hash is
+stored, so the value cannot be retrieved again. The `passwordHash` field is
+explicitly stripped from the object returned by `authenticate`:
 
 ```ts
 const { passwordHash: _ignored, ...safeUser } = user;
@@ -1011,6 +1015,7 @@ security requirements.
 | **CSV quoting** | Cells containing a comma, quote or newline are quoted and internal quotes are doubled |
 | **UTF-8 byte-order mark on CSV exports** | `csvResponse` prefixes `\uFEFF` so that spreadsheet applications detect UTF-8 correctly |
 | **Password values are never echoed** | `getProfile` selects explicit columns and never includes `password_hash` |
+| **Administrator-only provisioning** | There is no self-registration endpoint. Account creation and password resets are guarded by `requireRole('ADMIN')`; the API generates the email address (`students.attendease.edu` / `faculty.attendease.edu`) and a 12-character policy-compliant temporary password, returns it once to the admin and stores only its bcrypt hash (`backend/src/services/credentials.service.ts`) |
 | **Graceful shutdown** | `SIGTERM`/`SIGINT` close the HTTP server and disconnect the Prisma client, with a 10-second forced-exit fallback |
 | **Startup database verification** | The process exits with code 1 if the database cannot be reached, rather than serving errors |
 | **Frontend session restoration** | The application calls `GET /api/auth/me` on load and clears the local user on any failure, so a revoked session does not leave a stale UI |

@@ -366,7 +366,7 @@ All endpoints live under `/api` and return a consistent envelope:
 |---|---|---|
 | Authentication | `/api/auth` | `login`, `logout`, `me`, `forgot-password`, `reset-password` |
 | Academic setup | `/api/departments`, `/api/academic-years`, `/api/semesters`, `/api/subjects`, `/api/sections`, `/api/academic-options` | admin-managed, unique codes |
-| People | `/api/students`, `/api/faculty` | CRUD, search, pagination, CSV import/export |
+| People | `/api/students`, `/api/faculty` | admin-created accounts with issued credentials, CRUD, search, pagination, CSV import/export |
 | Teaching setup | `/api/assignments`, `/api/enrollments` | faculty-subject assignments, class roster |
 | Attendance | `/api/attendance` | sessions, records, student/subject views |
 | Reports | `/api/reports` | nine report types, CSV export |
@@ -380,7 +380,9 @@ Full request/response documentation: `docs/07-api-reference.md`.
 ## Security model
 
 - **Passwords** are hashed with bcrypt (12 rounds, per-user salt). The plain
-  password is never stored, logged or returned.
+  password is never stored or logged; the one exception is a generated temporary
+  password, which is returned once to the administrator who just created or
+  reset the account (see [Account provisioning](#account-provisioning)).
 - **Sessions** use a JWT delivered in an `httpOnly`, `sameSite=lax` cookie. The
   token is never exposed to JavaScript.
 - **CSRF**: because authentication is cookie-based, every mutating request must
@@ -400,6 +402,27 @@ Full request/response documentation: `docs/07-api-reference.md`.
   production.
 - **Audit log** records sign-ins, administrative changes and attendance
   submissions with actor, entity and timestamp.
+
+### Account provisioning
+
+There is no self-registration. Only an administrator can create student or
+faculty accounts, and the account holder never chooses their own password:
+
+1. The admin fills in the person's details under **Students → Add** or
+   **Faculty → Add**. The email address may be left blank.
+2. The API issues an institutional address when none is supplied
+   (`first.last@students.attendease.edu` / `@faculty.attendease.edu`, with a
+   numeric suffix when the address is already taken) and generates a 12-character
+   temporary password that satisfies the password policy.
+3. The plain password is returned once, in the create/reset response, and shown
+   in a credentials dialog that can copy the details or open a pre-filled email.
+   Only the bcrypt hash is stored — the password cannot be retrieved again.
+4. The same rule applies to **Reset password** on the students and faculty
+   lists: the previous password stops working immediately and a new generated
+   password is shown once.
+
+If the admin supplies their own email or password, it is used instead of a
+generated one, subject to the same validation.
 
 Details: `docs/08-security.md`.
 
