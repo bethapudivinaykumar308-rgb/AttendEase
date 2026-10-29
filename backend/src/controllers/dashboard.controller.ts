@@ -9,6 +9,7 @@ import {
   getStudentMonthlySummary,
   getStudentOverallSummary,
   getStudentSubjectSummaries,
+  calculatePercentage,
   summarise,
   emptyBreakdown,
 } from '../services/attendance.service.js';
@@ -225,28 +226,46 @@ export const adminDashboard = asyncHandler(async (_req: Request, res: Response) 
     })
     .sort((a, b) => b.percentage - a.percentage);
 
-  // Students below the attendance threshold.
-  const students = await prisma.student.findMany({
+  // Students below the attendance threshold. Aggregated in a single query so
+  // the dashboard does not issue one round trip per student.
+  const activeStudentsList = await prisma.student.findMany({
     where: { user: { isActive: true } },
-    select: { id: true },
+    select: { id: true, rollNumber: true, user: { select: { name: true } } },
   });
 
-  const belowThreshold: { studentId: number; name: string; rollNumber: string; percentage: number }[] = [];
-  for (const student of students) {
-    const summary = await getStudentOverallSummary(student.id);
-    if (summary.total > 0 && summary.percentage < env.thresholdPercent) {
-      const profile = await prisma.student.findUnique({
-        where: { id: student.id },
-        select: { rollNumber: true, user: { select: { name: true } } },
-      });
-      belowThreshold.push({
-        studentId: student.id,
-        name: profile?.user.name ?? '',
-        rollNumber: profile?.rollNumber ?? '',
-        percentage: summary.percentage,
-      });
-    }
+  const statusCounts = await prisma.attendanceRecord.groupBy({
+    by: ['studentId', 'attendanceStatus'],
+    where: { attendanceSessionId: { in: allSessions.map((session) => session.id) } },
+    _count: { _all: true },
+  });
+
+  const breakdownByStudent = new Map<number, ReturnType<typeof emptyBreakdown>>();
+  for (const row of statusCounts) {
+    const entry = breakdownByStudent.get(row.studentId) ?? emptyBreakdown();
+    const count = row._count._all;
+    if (row.attendanceStatus === 'PRESENT') entry.present += count;
+    else if (row.attendanceStatus === 'ABSENT') entry.absent += count;
+    else if (row.attendanceStatus === 'LATE') entry.late += count;
+    else if (row.attendanceStatus === 'ON_LEAVE') entry.onLeave += count;
+    breakdownByStudent.set(row.studentId, entry);
   }
+
+  const belowThreshold = activeStudentsList.flatMap((student) => {
+    const breakdown = breakdownByStudent.get(student.id);
+    if (!breakdown) return [];
+    const total = breakdown.present + breakdown.absent + breakdown.late + breakdown.onLeave;
+    if (total === 0) return [];
+    const percentage = calculatePercentage(breakdown, total);
+    if (percentage >= env.thresholdPercent) return [];
+    return [
+      {
+        studentId: student.id,
+        name: student.user.name,
+        rollNumber: student.rollNumber,
+        percentage,
+      },
+    ];
+  });
 
   sendSuccess(res, {
     stats: {
