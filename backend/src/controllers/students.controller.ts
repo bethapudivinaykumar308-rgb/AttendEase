@@ -5,6 +5,10 @@ import { sendPaginated, sendSuccess } from '../utils/response.js';
 import { badRequest, conflict, forbidden, notFound } from '../utils/errors.js';
 import { recordAudit } from '../services/audit.service.js';
 import { hashPassword } from '../services/auth.service.js';
+import {
+  generateTemporaryPassword,
+  generateUniqueEmail,
+} from '../services/credentials.service.js';
 import { csvResponse, toCsv } from '../utils/csv.js';
 import { resolveCallerScope, taughtEnrollmentFilter } from '../utils/scope.js';
 import {
@@ -85,8 +89,8 @@ export const createStudent = asyncHandler(async (req: Request, res: Response) =>
   const { name, email, password, rollNumber, departmentId, semesterId, section, admissionYear } =
     req.body as {
       name: string;
-      email: string;
-      password: string;
+      email?: string;
+      password?: string;
       rollNumber: string;
       departmentId: number;
       semesterId: number;
@@ -94,17 +98,20 @@ export const createStudent = asyncHandler(async (req: Request, res: Response) =>
       admissionYear: number;
     };
 
-  const existingUser = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+  const finalEmail = email ?? (await generateUniqueEmail(name, 'STUDENT'));
+
+  const existingUser = await prisma.user.findUnique({ where: { email: finalEmail.toLowerCase() } });
   if (existingUser) throw conflict('An account with this email already exists');
 
   const existingRoll = await prisma.student.findUnique({ where: { rollNumber } });
   if (existingRoll) throw conflict('A student with this roll number already exists');
 
-  const passwordHash = await hashPassword(password);
+  const temporaryPassword = password ?? generateTemporaryPassword();
+  const passwordHash = await hashPassword(temporaryPassword);
 
   const student = await prisma.$transaction(async (tx) => {
     const user = await tx.user.create({
-      data: { name, email: email.toLowerCase(), passwordHash, role: 'STUDENT' },
+      data: { name, email: finalEmail.toLowerCase(), passwordHash, role: 'STUDENT' },
     });
     return tx.student.create({
       data: { userId: user.id, rollNumber, departmentId, semesterId, section, admissionYear },
@@ -117,11 +124,16 @@ export const createStudent = asyncHandler(async (req: Request, res: Response) =>
     action: 'CREATE',
     entityType: 'Student',
     entityId: student.id,
-    details: { rollNumber, email },
+    details: { rollNumber, email: finalEmail, credentialsGenerated: !password },
     req,
   });
 
-  sendSuccess(res, student, 201);
+  // The password is shown to the administrator once and never stored in clear.
+  sendSuccess(
+    res,
+    { ...student, credentials: { email: finalEmail, temporaryPassword } },
+    201,
+  );
 });
 
 export const getStudent = asyncHandler(async (req: Request, res: Response) => {
@@ -260,8 +272,9 @@ export const resetStudentPassword = asyncHandler(async (req: Request, res: Respo
   const student = await prisma.student.findUnique({ where: { id } });
   if (!student) throw notFound('Student not found');
 
-  const { password } = req.body as { password: string };
-  const passwordHash = await hashPassword(password);
+  const { password } = req.body as { password?: string };
+  const newPassword = password ?? generateTemporaryPassword();
+  const passwordHash = await hashPassword(newPassword);
   await prisma.user.update({ where: { id: student.userId }, data: { passwordHash } });
 
   await recordAudit({
@@ -269,10 +282,11 @@ export const resetStudentPassword = asyncHandler(async (req: Request, res: Respo
     action: 'PASSWORD_RESET',
     entityType: 'Student',
     entityId: id,
+    details: { generated: !password },
     req,
   });
 
-  sendSuccess(res, { message: 'Password reset successfully' });
+  sendSuccess(res, { message: 'Password reset successfully', password: newPassword });
 });
 
 export const exportStudents = asyncHandler(async (req: Request, res: Response) => {

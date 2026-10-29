@@ -8,10 +8,16 @@ import {
   sectionSchema,
 } from './common.validator.js';
 
+/** Blank or missing means "the administrator wants a generated password". */
+const optionalPassword = z.preprocess(
+  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+  passwordSchema.optional(),
+);
+
 export const createStudentSchema = z.object({
   name: nameSchema,
-  email: emailSchema,
-  password: passwordSchema,
+  email: emailSchema.optional(),
+  password: optionalPassword,
   rollNumber: z.string().trim().min(2).max(40),
   departmentId: z.coerce.number().int().positive(),
   semesterId: z.coerce.number().int().positive(),
@@ -43,8 +49,8 @@ export const studentListSchema = paginationSchema.extend({
 
 export const createFacultySchema = z.object({
   name: nameSchema,
-  email: emailSchema,
-  password: passwordSchema,
+  email: emailSchema.optional(),
+  password: optionalPassword,
   facultyId: z.string().trim().min(2).max(40),
   departmentId: z.coerce.number().int().positive(),
   designation: z.string().trim().min(2).max(80),
@@ -81,8 +87,13 @@ export const enrollmentBodySchema = z.object({
   sectionId: z.coerce.number().int().positive().optional(),
 });
 
-export const resetPasswordSchema = z.object({
-  password: passwordSchema,
-});
+/**
+ * The admin either supplies a password or lets the API generate one, so the
+ * body itself may be empty.
+ */
+export const resetPasswordSchema = z
+  .object({ password: optionalPassword })
+  .optional()
+  .transform((value) => value ?? {});
 
 export { idParam };

@@ -5,6 +5,10 @@ import { sendPaginated, sendSuccess } from '../utils/response.js';
 import { conflict, notFound } from '../utils/errors.js';
 import { recordAudit } from '../services/audit.service.js';
 import { hashPassword } from '../services/auth.service.js';
+import {
+  generateTemporaryPassword,
+  generateUniqueEmail,
+} from '../services/credentials.service.js';
 import { csvResponse, toCsv } from '../utils/csv.js';
 
 const facultyInclude = {
@@ -57,24 +61,27 @@ export const listFaculty = asyncHandler(async (req: Request, res: Response) => {
 export const createFaculty = asyncHandler(async (req: Request, res: Response) => {
   const { name, email, password, facultyId, departmentId, designation } = req.body as {
     name: string;
-    email: string;
-    password: string;
+    email?: string;
+    password?: string;
     facultyId: string;
     departmentId: number;
     designation: string;
   };
 
-  const existingUser = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+  const finalEmail = email ?? (await generateUniqueEmail(name, 'FACULTY'));
+
+  const existingUser = await prisma.user.findUnique({ where: { email: finalEmail.toLowerCase() } });
   if (existingUser) throw conflict('An account with this email already exists');
 
   const existingFaculty = await prisma.faculty.findUnique({ where: { facultyId } });
   if (existingFaculty) throw conflict('A faculty member with this ID already exists');
 
-  const passwordHash = await hashPassword(password);
+  const temporaryPassword = password ?? generateTemporaryPassword();
+  const passwordHash = await hashPassword(temporaryPassword);
 
   const faculty = await prisma.$transaction(async (tx) => {
     const user = await tx.user.create({
-      data: { name, email: email.toLowerCase(), passwordHash, role: 'FACULTY' },
+      data: { name, email: finalEmail.toLowerCase(), passwordHash, role: 'FACULTY' },
     });
     return tx.faculty.create({
       data: { userId: user.id, facultyId, departmentId, designation },
@@ -87,11 +94,16 @@ export const createFaculty = asyncHandler(async (req: Request, res: Response) =>
     action: 'CREATE',
     entityType: 'Faculty',
     entityId: faculty.id,
-    details: { facultyId, email },
+    details: { facultyId, email: finalEmail, credentialsGenerated: !password },
     req,
   });
 
-  sendSuccess(res, faculty, 201);
+  // The password is shown to the administrator once and never stored in clear.
+  sendSuccess(
+    res,
+    { ...faculty, credentials: { email: finalEmail, temporaryPassword } },
+    201,
+  );
 });
 
 export const getFaculty = asyncHandler(async (req: Request, res: Response) => {
@@ -194,8 +206,9 @@ export const resetFacultyPassword = asyncHandler(async (req: Request, res: Respo
   const faculty = await prisma.faculty.findUnique({ where: { id } });
   if (!faculty) throw notFound('Faculty member not found');
 
-  const { password } = req.body as { password: string };
-  const passwordHash = await hashPassword(password);
+  const { password } = req.body as { password?: string };
+  const newPassword = password ?? generateTemporaryPassword();
+  const passwordHash = await hashPassword(newPassword);
   await prisma.user.update({ where: { id: faculty.userId }, data: { passwordHash } });
 
   await recordAudit({
@@ -203,10 +216,11 @@ export const resetFacultyPassword = asyncHandler(async (req: Request, res: Respo
     action: 'PASSWORD_RESET',
     entityType: 'Faculty',
     entityId: id,
+    details: { generated: !password },
     req,
   });
 
-  sendSuccess(res, { message: 'Password reset successfully' });
+  sendSuccess(res, { message: 'Password reset successfully', password: newPassword });
 });
 
 export const exportFaculty = asyncHandler(async (req: Request, res: Response) => {

@@ -12,6 +12,7 @@ import { FilterBar } from '@/components/filters-bar';
 import { Pagination } from '@/components/pagination';
 import { ErrorState } from '@/components/states';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { CredentialsDialog, type IssuedCredentials } from '@/components/credentials-dialog';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -54,6 +55,7 @@ export default function AdminStudentsPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [importRows, setImportRows] = useState('');
   const [importError, setImportError] = useState<string | null>(null);
+  const [issued, setIssued] = useState<IssuedCredentials | null>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 300);
@@ -127,12 +129,21 @@ export default function AdminStudentsPage() {
   });
 
   const resetPasswordMutation = useMutation({
-    mutationFn: async ({ student, password }: { student: Student; password: string }) => {
-      await api.post(`/api/students/${student.id}/reset-password`, { password });
-      return student;
+    mutationFn: async (student: Student) => {
+      const result = await api.post<{ password: string }>(
+        `/api/students/${student.id}/reset-password`,
+        {},
+      );
+      return { student, password: result.password };
     },
-    onSuccess: (student) => {
-      toast.success('Password reset', `A new password was set for ${student.rollNumber}.`);
+    onSuccess: ({ student, password }) => {
+      toast.success('New password issued', `Share it with ${student.user.name}.`);
+      setIssued({
+        name: student.user.name,
+        role: 'STUDENT',
+        email: student.user.email,
+        temporaryPassword: password,
+      });
     },
     onError: (error: unknown) =>
       toast.error(
@@ -244,13 +255,7 @@ export default function AdminStudentsPage() {
             variant="ghost"
             size="icon-sm"
             aria-label={`Reset password for ${row.rollNumber}`}
-            onClick={() => {
-              const password = window.prompt(
-                `New password for ${row.user.name}. It must be at least 8 characters with an uppercase letter, a lowercase letter and a number.`,
-                'Attend@123',
-              );
-              if (password) resetPasswordMutation.mutate({ student: row, password });
-            }}
+            onClick={() => resetPasswordMutation.mutate(row)}
           >
             <KeyRound className="h-3.5 w-3.5" />
           </Button>
@@ -487,6 +492,8 @@ export default function AdminStudentsPage() {
           if (pendingDeactivate) deactivateMutation.mutate(pendingDeactivate);
         }}
       />
+
+      <CredentialsDialog credentials={issued} onClose={() => setIssued(null)} />
 
       <Dialog open={importOpen} onOpenChange={setImportOpen}>
         <DialogContent className="max-w-2xl">

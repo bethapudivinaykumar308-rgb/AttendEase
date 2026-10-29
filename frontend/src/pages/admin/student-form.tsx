@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -10,6 +10,7 @@ import { useToast } from '@/hooks/use-toast';
 import { useAcademicOptions } from '@/hooks/use-academic-options';
 import { PageHeader } from '@/components/page-header';
 import { LoadingState } from '@/components/states';
+import { CredentialsDialog, type IssuedCredentials } from '@/components/credentials-dialog';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -24,12 +25,9 @@ import {
 import { Switch } from '@/components/ui/switch';
 import type { Student } from '@/types';
 
-const passwordRule = z
-  .string()
-  .min(8, 'Password must be at least 8 characters')
-  .regex(/[a-z]/, 'Password must contain a lowercase letter')
-  .regex(/[A-Z]/, 'Password must contain an uppercase letter')
-  .regex(/[0-9]/, 'Password must contain a number');
+interface CreatedStudent extends Student {
+  credentials: { email: string; temporaryPassword: string };
+}
 
 const studentSchema = z.object({
   name: z
@@ -37,8 +35,7 @@ const studentSchema = z.object({
     .trim()
     .min(2, 'Name must be at least 2 characters')
     .max(120, 'Name must be 120 characters or fewer'),
-  email: z.string().trim().email('Enter a valid email address'),
-  password: z.string().optional(),
+  email: z.union([z.literal(''), z.string().trim().email('Enter a valid email address')]),
   rollNumber: z.string().trim().min(2, 'Roll number is required').max(40),
   departmentId: z.number({ invalid_type_error: 'Select a department' }).int().positive(),
   semesterId: z.number({ invalid_type_error: 'Select a semester' }).int().positive(),
@@ -59,6 +56,7 @@ export default function AdminStudentFormPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const options = useAcademicOptions();
+  const [issued, setIssued] = useState<IssuedCredentials | null>(null);
 
   const studentQuery = useQuery({
     queryKey: ['admin', 'student', id],
@@ -71,7 +69,6 @@ export default function AdminStudentFormPage() {
     defaultValues: {
       name: '',
       email: '',
-      password: '',
       rollNumber: '',
       departmentId: 0,
       semesterId: 0,
@@ -87,7 +84,6 @@ export default function AdminStudentFormPage() {
     form.reset({
       name: student.user.name,
       email: student.user.email,
-      password: '',
       rollNumber: student.rollNumber,
       departmentId: student.departmentId,
       semesterId: student.semesterId,
@@ -99,36 +95,32 @@ export default function AdminStudentFormPage() {
   }, [studentQuery.data]);
 
   async function onSubmit(values: StudentFormValues) {
-    if (!isEdit) {
-      const parsed = passwordRule.safeParse(values.password ?? '');
-      if (!parsed.success) {
-        form.setError('password', {
-          message: parsed.error.issues[0]?.message ?? 'Enter a valid password',
-        });
-        return;
-      }
-    }
-
     const payload = {
       name: values.name.trim(),
-      email: values.email.trim().toLowerCase(),
+      ...(values.email.trim() ? { email: values.email.trim().toLowerCase() } : {}),
       rollNumber: values.rollNumber.trim(),
       departmentId: values.departmentId,
       semesterId: values.semesterId,
       section: values.section.trim().toUpperCase(),
       admissionYear: values.admissionYear,
-      ...(isEdit ? { isActive: values.isActive ?? true } : { password: values.password }),
+      ...(isEdit ? { isActive: values.isActive ?? true } : {}),
     };
 
     try {
       if (isEdit) {
         await api.put(`/api/students/${id}`, payload);
         toast.success('Student updated', 'The student record has been saved.');
+        navigate('/admin/students');
       } else {
-        await api.post('/api/students', payload);
-        toast.success('Student created', 'The student can now sign in.');
+        const created = await api.post<CreatedStudent>('/api/students', payload);
+        toast.success('Student created', 'Share the generated credentials with the student.');
+        setIssued({
+          name: values.name.trim(),
+          role: 'STUDENT',
+          email: created.credentials.email,
+          temporaryPassword: created.credentials.temporaryPassword,
+        });
       }
-      navigate('/admin/students');
     } catch (error) {
       const message =
         error instanceof ApiError ? error.message : 'Unable to reach the server. Please try again.';
@@ -150,7 +142,7 @@ export default function AdminStudentFormPage() {
         description={
           isEdit
             ? 'Update the student’s enrolment details. History is never removed.'
-            : 'Register a new student and set up their initial sign-in details.'
+            : 'Create a student account and hand over the generated sign-in details.'
         }
         breadcrumbs={[
           { label: 'Admin', to: '/admin' },
@@ -171,7 +163,7 @@ export default function AdminStudentFormPage() {
           <CardDescription>
             {isEdit
               ? 'The email address is the student’s sign-in identity.'
-              : 'The student signs in with the email address and password set here.'}
+              : 'The student signs in with the generated email address and temporary password.'}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -199,19 +191,24 @@ export default function AdminStudentFormPage() {
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="email">
-                  Email address<span className="ml-0.5 text-destructive">*</span>
-                </Label>
+                <Label htmlFor="email">Email address</Label>
                 <Input
                   id="email"
                   type="email"
                   autoComplete="email"
+                  placeholder="Leave blank to generate"
                   aria-invalid={Boolean(form.formState.errors.email)}
                   {...form.register('email')}
                 />
-                {form.formState.errors.email && (
+                {form.formState.errors.email ? (
                   <p className="text-xs font-medium text-destructive">
                     {form.formState.errors.email.message}
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {isEdit
+                      ? 'The email address is the sign-in identity.'
+                      : '@students.attendease.edu is used when this is left blank.'}
                   </p>
                 )}
               </div>
@@ -330,29 +327,6 @@ export default function AdminStudentFormPage() {
                 )}
               </div>
 
-              {!isEdit && (
-                <div className="space-y-1.5">
-                  <Label htmlFor="password">
-                    Temporary password<span className="ml-0.5 text-destructive">*</span>
-                  </Label>
-                  <Input
-                    id="password"
-                    type="password"
-                    autoComplete="new-password"
-                    aria-invalid={Boolean(form.formState.errors.password)}
-                    {...form.register('password')}
-                  />
-                  {form.formState.errors.password && (
-                    <p className="text-xs font-medium text-destructive">
-                      {form.formState.errors.password.message}
-                    </p>
-                  )}
-                  <p className="text-xs text-muted-foreground">
-                    At least 8 characters with an uppercase letter, a lowercase letter and a number.
-                  </p>
-                </div>
-              )}
-
               {isEdit && (
                 <div className="flex items-center justify-between rounded-md border border-border px-3 py-2 sm:col-span-2">
                   <div>
@@ -379,8 +353,9 @@ export default function AdminStudentFormPage() {
             <div className="flex items-start gap-2.5 rounded-md border border-border bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
-                Passwords are stored as salted hashes. Use the reset action on the students list to
-                issue a new password for an existing account.
+                {isEdit
+                  ? 'Passwords are stored as salted hashes. Use the key action on the students list to issue a new password.'
+                  : 'The temporary password is generated for you and shown once after the account is created. Only an administrator can create accounts or issue new passwords.'}
               </span>
             </div>
 
@@ -395,6 +370,14 @@ export default function AdminStudentFormPage() {
           </form>
         </CardContent>
       </Card>
+
+      <CredentialsDialog
+        credentials={issued}
+        onClose={() => {
+          setIssued(null);
+          navigate('/admin/students');
+        }}
+      />
     </div>
   );
 }
