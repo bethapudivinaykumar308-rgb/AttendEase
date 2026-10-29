@@ -1,0 +1,356 @@
+// AttendEase - Student Attendance Management System
+// Database schema (MySQL 8.x) for the `attendance_management` database.
+//
+// Design notes
+//  * Primary keys are auto-incrementing BIGINTs.
+//  * Historical attendance is never destroyed by deactivating a user, subject
+//    or student: those entities are soft-deleted via `is_active` flags.
+//  * Referential integrity is enforced with explicit `onDelete` behaviour.
+//    - Master data (departments, subjects, ...) cascades only from entities
+//      that can never carry attendance history.
+//    - Attendance history restricts deletion to protect the audit trail.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  FACULTY
+  STUDENT
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  ON_LEAVE
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id           Int      @id @default(autoincrement())
+  name         String   @db.VarChar(120)
+  email        String   @unique @db.VarChar(160)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  role         Role
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  student       Student?
+  faculty       Faculty?
+  auditLogs     AuditLog[]
+  resetTokens   PasswordResetToken[]
+  markedRecords AttendanceRecord[]   @relation("MarkedBy")
+  sessions      AttendanceSession[]  @relation("SessionCreator")
+
+  @@index([role])
+  @@index([isActive])
+  @@map("users")
+}
+
+/// One-time tokens for the "forgot password" flow. Tokens are stored hashed.
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  userId    Int       @map("user_id")
+  tokenHash String    @unique @map("token_hash") @db.VarChar(128)
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Academic structure
+// ---------------------------------------------------------------------------
+
+model Department {
+  id             Int      @id @default(autoincrement())
+  departmentName String   @map("department_name") @db.VarChar(120)
+  departmentCode String   @unique @map("department_code") @db.VarChar(20)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  students Student[]
+  faculty  Faculty[]
+  subjects Subject[]
+
+  @@map("departments")
+}
+
+model AcademicYear {
+  id        Int      @id @default(autoincrement())
+  yearName  String   @unique @map("year_name") @db.VarChar(20)
+  startDate DateTime @map("start_date") @db.Date
+  endDate   DateTime @map("end_date") @db.Date
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  semesters   Semester[]
+  subjects    Subject[]
+  assignments FacultySubject[]
+  enrollments Enrollment[]
+  sessions    AttendanceSession[]
+  sections    Section[]
+
+  @@index([isActive])
+  @@map("academic_years")
+}
+
+model Semester {
+  id             Int      @id @default(autoincrement())
+  semesterNumber Int      @map("semester_number")
+  academicYearId Int      @map("academic_year_id")
+  startDate      DateTime @map("start_date") @db.Date
+  endDate        DateTime @map("end_date") @db.Date
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  students     Student[]
+  subjects     Subject[]
+
+  @@unique([academicYearId, semesterNumber], name: "semester_number_per_year")
+  @@index([academicYearId])
+  @@map("semesters")
+}
+
+/// A teaching section (e.g. "A" / "B") belonging to a subject offering.
+/// Sections are derived from subject offerings, so they live in their own
+/// lookup table to keep referential integrity when subjects are deactivated.
+model Section {
+  id             Int      @id @default(autoincrement())
+  subjectId      Int      @map("subject_id")
+  section        String   @db.VarChar(10)
+  academicYearId Int      @map("academic_year_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  subject      Subject             @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  academicYear AcademicYear        @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  assignments  FacultySubject[]
+  enrollments  Enrollment[]
+  sessions     AttendanceSession[] @relation("SessionSection")
+
+  @@unique([subjectId, section, academicYearId], name: "unique_section_offering")
+  @@index([subjectId])
+  @@index([academicYearId])
+  @@map("sections")
+}
+
+// ---------------------------------------------------------------------------
+// People
+// ---------------------------------------------------------------------------
+
+model Student {
+  id            Int      @id @default(autoincrement())
+  userId        Int      @unique @map("user_id")
+  rollNumber    String   @unique @map("roll_number") @db.VarChar(40)
+  departmentId  Int      @map("department_id")
+  semesterId    Int      @map("semester_id")
+  section       String   @db.VarChar(10)
+  admissionYear Int      @map("admission_year")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  semester   Semester   @relation(fields: [semesterId], references: [id], onDelete: Restrict)
+
+  enrollments Enrollment[]
+  records     AttendanceRecord[]
+
+  @@index([departmentId])
+  @@index([semesterId])
+  @@index([section])
+  @@map("students")
+}
+
+model Faculty {
+  id           Int      @id @default(autoincrement())
+  userId       Int      @unique @map("user_id")
+  facultyId    String   @unique @map("faculty_id") @db.VarChar(40)
+  departmentId Int      @map("department_id")
+  designation  String   @db.VarChar(80)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+
+  assignments FacultySubject[]
+  sessions    AttendanceSession[]
+
+  @@index([departmentId])
+  @@map("faculty")
+}
+
+model Subject {
+  id             Int      @id @default(autoincrement())
+  subjectCode    String   @unique @map("subject_code") @db.VarChar(40)
+  subjectName    String   @map("subject_name") @db.VarChar(160)
+  departmentId   Int      @map("department_id")
+  semesterId     Int      @map("semester_id")
+  academicYearId Int      @map("academic_year_id")
+  credits        Int      @default(3)
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  department   Department   @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  semester     Semester     @relation(fields: [semesterId], references: [id], onDelete: Restrict)
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+
+  sections    Section[]
+  assignments FacultySubject[]
+  enrollments Enrollment[]
+  sessions    AttendanceSession[]
+
+  @@index([departmentId])
+  @@index([semesterId])
+  @@index([academicYearId])
+  @@map("subjects")
+}
+
+// ---------------------------------------------------------------------------
+// Many-to-many relationships
+// ---------------------------------------------------------------------------
+
+/// Which faculty member teaches which subject, in which section and year.
+model FacultySubject {
+  id             Int      @id @default(autoincrement())
+  facultyId      Int      @map("faculty_id")
+  subjectId      Int      @map("subject_id")
+  academicYearId Int      @map("academic_year_id")
+  sectionId      Int      @map("section_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  faculty      Faculty      @relation(fields: [facultyId], references: [id], onDelete: Cascade)
+  subject      Subject      @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  section      Section      @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+
+  sessions AttendanceSession[]
+
+  @@unique([facultyId, subjectId, sectionId, academicYearId], name: "unique_faculty_subject_assignment")
+  @@index([subjectId])
+  @@index([academicYearId])
+  @@map("faculty_subjects")
+}
+
+/// A student registered for a subject (optionally within a section).
+model Enrollment {
+  id             Int      @id @default(autoincrement())
+  studentId      Int      @map("student_id")
+  subjectId      Int      @map("subject_id")
+  academicYearId Int      @map("academic_year_id")
+  sectionId      Int?     @map("section_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  student      Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subject      Subject      @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  section      Section?     @relation(fields: [sectionId], references: [id], onDelete: SetNull)
+
+  @@unique([studentId, subjectId, academicYearId], name: "unique_student_subject_enrollment")
+  @@index([subjectId])
+  @@index([academicYearId])
+  @@index([sectionId])
+  @@map("enrollments")
+}
+
+// ---------------------------------------------------------------------------
+// Attendance
+// ---------------------------------------------------------------------------
+
+model AttendanceSession {
+  id             Int      @id @default(autoincrement())
+  subjectId      Int      @map("subject_id")
+  facultyId      Int      @map("faculty_id")
+  academicYearId Int      @map("academic_year_id")
+  sectionId      Int      @map("section_id")
+  section        String   @db.VarChar(10)
+  attendanceDate DateTime @map("attendance_date") @db.Date
+  startTime      String?  @map("start_time") @db.VarChar(20)
+  endTime        String?  @map("end_time") @db.VarChar(20)
+  sessionNumber  Int      @default(1) @map("session_number")
+  topic          String?  @db.VarChar(200)
+  isCancelled    Boolean  @default(false) @map("is_cancelled")
+  createdById    Int?     @map("created_by")
+  assignmentId   Int?     @map("assignment_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  subject         Subject         @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  faculty         Faculty         @relation(fields: [facultyId], references: [id], onDelete: Restrict)
+  academicYear    AcademicYear    @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  sectionOffering Section         @relation("SessionSection", fields: [sectionId], references: [id], onDelete: Restrict)
+  assignment      FacultySubject? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  createdBy       User?           @relation("SessionCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  records AttendanceRecord[]
+
+  @@unique([subjectId, sectionId, academicYearId, attendanceDate, sessionNumber], name: "unique_session_slot")
+  @@index([subjectId])
+  @@index([facultyId])
+  @@index([attendanceDate])
+  @@index([academicYearId])
+  @@index([sectionId])
+  @@map("attendance_sessions")
+}
+
+model AttendanceRecord {
+  id                  Int              @id @default(autoincrement())
+  attendanceSessionId Int              @map("attendance_session_id")
+  studentId           Int              @map("student_id")
+  attendanceStatus    AttendanceStatus @map("attendance_status")
+  markedById          Int?             @map("marked_by")
+  remarks             String?          @db.VarChar(255)
+  markedAt            DateTime         @default(now()) @map("marked_at")
+  updatedAt           DateTime         @updatedAt @map("updated_at")
+
+  session  AttendanceSession @relation(fields: [attendanceSessionId], references: [id], onDelete: Cascade)
+  student  Student           @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  markedBy User?             @relation("MarkedBy", fields: [markedById], references: [id], onDelete: SetNull)
+
+  @@unique([attendanceSessionId, studentId], name: "unique_student_per_session")
+  @@index([studentId])
+  @@index([attendanceStatus])
+  @@map("attendance_records")
+}
+
+// ---------------------------------------------------------------------------
+// Audit trail
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  userId     Int?     @map("user_id")
+  action     String   @db.VarChar(60)
+  entityType String   @map("entity_type") @db.VarChar(60)
+  entityId   String?  @map("entity_id") @db.VarChar(64)
+  details    String?  @db.Text
+  ipAddress  String?  @map("ip_address") @db.VarChar(45)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

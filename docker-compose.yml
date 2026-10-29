@@ -1,0 +1,86 @@
+# AttendEase - full stack production stack.
+#
+#   cp .env.example .env     # then set DATABASE_URL, JWT_SECRET, ...
+#   docker compose up -d --build
+#
+# The stack is: MySQL 8.4 (database), the Express API (backend) and the
+# nginx-served React build (frontend). Only the web container is published on
+# the host; it reverse proxies /api to the API container.
+
+name: attendease
+
+services:
+  db:
+    image: mysql:8.4
+    container_name: attendease-db
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+00:00
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-attendance_management}
+      MYSQL_USER: ${MYSQL_USER:-attendease}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+    volumes:
+      - attendease-mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks: [attendease]
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: attendease-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      API_PORT: "5000"
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      APP_URL: ${APP_URL:-http://localhost:8080}
+      API_URL: ${API_URL:-http://localhost:8080}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
+      RESET_TOKEN_TTL_MINUTES: ${RESET_TOKEN_TTL_MINUTES:-30}
+      ATTENDANCE_THRESHOLD_PERCENT: ${ATTENDANCE_THRESHOLD_PERCENT:-75}
+      ATTENDANCE_COUNTED_STATUSES: ${ATTENDANCE_COUNTED_STATUSES:-PRESENT,LATE}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      RATE_LIMIT_WINDOW_MINUTES: ${RATE_LIMIT_WINDOW_MINUTES:-15}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-300}
+      AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-20}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SECURE_COOKIES: ${SECURE_COOKIES:-true}
+    expose:
+      - "5000"
+    networks: [attendease]
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: attendease-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      API_UPSTREAM: api:5000
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    networks: [attendease]
+
+volumes:
+  attendease-mysql:
+
+networks:
+  attendease:
+    driver: bridge

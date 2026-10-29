@@ -1,0 +1,60 @@
+# AttendEase web client - nginx configuration.
+#
+# Rendered by the official nginx image entrypoint: every ${VARIABLE} that is
+# present in the environment is substituted at container start.
+
+upstream attendease_api {
+    server ${API_UPSTREAM};
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    client_max_body_size 2m;
+
+    # Security headers (the API sets its own for /api responses).
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+
+    # Compressed static assets.
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+
+    # Hashed build assets can be cached forever.
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-store";
+    }
+
+    # API traffic is proxied so the browser sees a single origin. That keeps
+    # the session cookie and the CSRF cookie first-party.
+    location /api/ {
+        proxy_pass http://attendease_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_read_timeout 120s;
+    }
+
+    # Client side routing: every unknown path is handled by React Router.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
