@@ -304,6 +304,27 @@ environment at run time.
 
 ---
 
+## Hosted deployment (Render + external MySQL)
+
+The public instance runs as a single Docker web service built from
+`Dockerfile.render`, which serves the API and the built SPA from one origin so
+the http-only session cookie and CSRF double-submit work without cross-site
+configuration. The database is a managed MySQL 8 instance, not a container.
+
+| Setting | Value |
+|---|---|
+| Runtime | Docker, `./Dockerfile.render` |
+| Health check | `GET /api/health` |
+| Start command | `prisma migrate deploy && node dist/server.js` |
+| Required env | `DATABASE_URL`, `JWT_SECRET`, `NODE_ENV=production`, `API_PORT=10000`, `APP_URL`, `API_URL`, `CORS_ORIGINS`, `SECURE_COOKIES=true`, `TRUST_PROXY=true` |
+| Resource | Free instance — spins down after 15 minutes idle, so the first request afterwards takes about 50 seconds |
+
+Remote databases cap concurrent connections, so include a matching
+`connection_limit` in the `DATABASE_URL` query string (the hosted instance uses
+`?sslaccept=accept_invalid_certs&connection_limit=2`).
+
+---
+
 ## Environment variables
 
 | Variable | Required | Default | Purpose |
